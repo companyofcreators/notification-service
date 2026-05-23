@@ -11,6 +11,7 @@ import (
 
 	"github.com/companyofcreators/notification-service/internal/app"
 	httphandler "github.com/companyofcreators/notification-service/internal/interfaces/http"
+	"github.com/companyofcreators/notification-service/pkg/header_auth"
 )
 
 func main() {
@@ -33,7 +34,8 @@ func main() {
 	go container.KafkaConsumer.Start(kafkaCtx, container.ProcessEvent)
 
 	// Build HTTP router
-	router := httphandler.NewRouter(container.NotificationHandler, container.WSHandler, log)
+	headerSigner := header_auth.NewHeaderSigner(container.Config.HeaderHMACKey)
+	router := httphandler.NewRouter(container.NotificationHandler, container.WSHandler, headerSigner, log)
 
 	// Create HTTP server
 	srv := &http.Server{

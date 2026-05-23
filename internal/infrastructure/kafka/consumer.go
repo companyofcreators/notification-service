@@ -67,7 +67,7 @@ func NewConsumer(cfg ConsumerConfig, log *slog.Logger) *Consumer {
 			Brokers:     cfg.Brokers,
 			Topic:       tc.topic,
 			GroupID:     cfg.ConsumerGroup,
-			MinBytes:    10e3,  // 10KB
+			MinBytes:    1,                 // 1 byte for immediate wake-up
 			MaxBytes:               10e6,  // 10MB
 			MaxWait:                500 * time.Millisecond,
 			StartOffset:            kafka.LastOffset,

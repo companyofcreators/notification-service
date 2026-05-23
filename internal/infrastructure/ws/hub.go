@@ -161,6 +161,15 @@ func (h *Hub) RegisterClient(userID uuid.UUID, conn *websocket.Conn) *Client {
 	go client.writePump()
 	go client.readPump()
 
+	// Send welcome message so client knows connection is established.
+	welcome, _ := json.Marshal(NotificationMessage{
+		Type: "notification.connected",
+	})
+	select {
+	case client.send <- welcome:
+	default:
+	}
+
 	return client
 }
 

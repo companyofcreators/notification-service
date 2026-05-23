@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/lib/pq"
 
@@ -147,7 +146,11 @@ func (r *NotificationRepo) MarkAsRead(ctx context.Context, id, userID uuid.UUID)
 	if err != nil {
 		return fmt.Errorf("mark as read: %w", err)
 	}
-	rowsAffected, _ := result.RowsAffected()
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to get rows affected", "error", err.Error())
+		return fmt.Errorf("rows affected: %w", err)
+	}
 	if rowsAffected == 0 {
 		return notification.ErrNotFound
 	}
@@ -188,7 +191,11 @@ func (r *NotificationRepo) Delete(ctx context.Context, id, userID uuid.UUID) err
 	if err != nil {
 		return fmt.Errorf("delete notification: %w", err)
 	}
-	rowsAffected, _ := result.RowsAffected()
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		r.log.ErrorContext(ctx, "failed to get rows affected", "error", err.Error())
+		return fmt.Errorf("rows affected: %w", err)
+	}
 	if rowsAffected == 0 {
 		return notification.ErrNotFound
 	}
@@ -253,5 +260,3 @@ func stringSliceToChannels(strs []string) []notification.DeliveryChannel {
 // Ensure NotificationRepo satisfies the repository interface.
 var _ notification.NotificationRepository = (*NotificationRepo)(nil)
 
-// Dummy usage to avoid unused import errors in case Data field changes.
-var _ = time.Now

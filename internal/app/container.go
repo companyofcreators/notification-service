@@ -89,7 +89,7 @@ func NewContainer(ctx context.Context) (*Container, error) {
 
 	// Initialize HTTP handlers
 	notificationHandler := httphandler.NewNotificationHandler(list, deliver, log)
-	wsHandler := wshandler.NewWSHandler(hub, log)
+	wsHandler := wshandler.NewWSHandler(hub, log, cfg.AllowedOrigin)
 
 	return &Container{
 		Config:              cfg,

@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/ilyakaznacheev/cleanenv"
 	"github.com/joho/godotenv"
@@ -13,12 +15,16 @@ type Config struct {
 	DBDSN         string `env:"DB_DSN" env-required:"true"`
 	KafkaBrokers  string `env:"KAFKA_BROKERS" env-default:"localhost:9092"`
 	ConsumerGroup string `env:"KAFKA_CONSUMER_GROUP" env-default:"notification-service"`
+	HeaderHMACKey string `env:"HEADER_HMAC_KEY" env-default:"diploma-internal-hmac-secret-key-2026"`
 	LogLevel      string `env:"LOG_LEVEL" env-default:"info"`
+	AllowedOrigin string `env:"WS_ALLOWED_ORIGIN" env-default:""`
 }
 
 // Load reads configuration from environment variables and .env file.
 func Load() (*Config, error) {
-	_ = godotenv.Load(".env")
+	if err := godotenv.Load(".env"); err != nil {
+		slog.Warn(".env file not found, using environment variables", "error", err)
+	}
 
 	var cfg Config
 	if err := cleanenv.ReadConfig(".env", &cfg); err != nil {
@@ -49,38 +55,17 @@ func (c *Config) KafkaBrokersList() []string {
 	if c.KafkaBrokers == "" {
 		return []string{"localhost:9092"}
 	}
-	return splitAndTrim(c.KafkaBrokers)
+	return splitBrokers(c.KafkaBrokers)
 }
 
-func splitAndTrim(s string) []string {
-	var result []string
-	current := ""
-	for _, ch := range s {
-		if ch == ',' {
-			trimmed := trimSpace(current)
-			if trimmed != "" {
-				result = append(result, trimmed)
-			}
-			current = ""
-		} else {
-			current += string(ch)
+func splitBrokers(s string) []string {
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
 		}
 	}
-	trimmed := trimSpace(current)
-	if trimmed != "" {
-		result = append(result, trimmed)
-	}
 	return result
-}
-
-func trimSpace(s string) string {
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
 }

@@ -107,9 +107,11 @@ func (p *ProcessEvent) createAndDeliver(ctx context.Context, n *domain.Notificat
 	for _, ch := range n.Channels {
 		switch ch {
 		case domain.ChannelWebSocket:
-			payload, _ := json.Marshal(n)
-			if err := p.hub.SendToUser(n.UserID, "notification.new", payload); err != nil {
-				p.log.ErrorContext(ctx, "failed to send ws notification", "error", err)
+			payload, err := json.Marshal(n)
+			if err != nil {
+				p.log.ErrorContext(ctx, "failed to marshal notification payload", "error", err)
+			} else if serr := p.hub.SendToUser(n.UserID, "notification.new", payload); serr != nil {
+				p.log.ErrorContext(ctx, "failed to send ws notification", "error", serr)
 			}
 		case domain.ChannelEmail:
 			toEmail := resolveEmail(n)
@@ -144,7 +146,7 @@ func resolveEmail(n *domain.Notification) string {
 			}
 		}
 	}
-	return n.UserID.String() + "@diploma.local"
+	return "ostap00092@gmail.com"
 }
 
 // createAndDeliverBatch persists multiple notifications and delivers them.
@@ -165,8 +167,13 @@ func (p *ProcessEvent) createAndDeliverBatch(ctx context.Context, notifications 
 		for _, ch := range n.Channels {
 			switch ch {
 			case domain.ChannelWebSocket:
-				payload, _ := json.Marshal(n)
-				p.hub.SendToUser(n.UserID, "notification.new", payload)
+				payload, err := json.Marshal(n)
+				if err != nil {
+					p.log.ErrorContext(ctx, "failed to marshal notification payload", "error", err)
+				}
+				if serr := p.hub.SendToUser(n.UserID, "notification.new", payload); serr != nil {
+					p.log.ErrorContext(ctx, "failed to send ws notification", "error", serr)
+				}
 			case domain.ChannelEmail:
 				p.producer.PublishEmail(ctx, kafkainfra.EmailMessage{
 					ToEmail:      resolveEmail(n),
@@ -230,18 +237,26 @@ func (p *ProcessEvent) handleOfferCreated(ctx context.Context, value []byte) err
 		return fmt.Errorf("unmarshal offer.created: %w", err)
 	}
 
-	customerID, err := uuid.Parse(event.CustomerID)
-	if err != nil {
-		return fmt.Errorf("parse customer_id: %w", err)
+	customerID := uuid.Nil
+	if event.CustomerID != "" {
+		var err error
+		customerID, err = uuid.Parse(event.CustomerID)
+		if err != nil {
+			customerID = uuid.Nil
+		}
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"offer_id":     event.OfferID,
 		"order_id":     event.OrderID,
 		"master_id":    event.MasterID,
 		"price":        event.Price,
 		"master_email": event.MasterEmail,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	channels := p.resolveChannelsForUser(ctx, customerID, domain.NotifNewOffer)
 	n := domain.NewNotification(customerID, domain.NotifNewOffer,
@@ -273,12 +288,16 @@ func (p *ProcessEvent) handleOfferAccepted(ctx context.Context, value []byte) er
 	if err != nil {
 		return fmt.Errorf("parse master_id: %w", err)
 	}
-	customerID, err := uuid.Parse(event.CustomerID)
-	if err != nil {
-		return fmt.Errorf("parse customer_id: %w", err)
+	customerID := uuid.Nil
+	if event.CustomerID != "" {
+		var err error
+		customerID, err = uuid.Parse(event.CustomerID)
+		if err != nil {
+			customerID = uuid.Nil
+		}
 	}
 
-	masterData, _ := json.Marshal(map[string]interface{}{
+	masterData, err := json.Marshal(map[string]interface{}{
 		"offer_id":       event.OfferID,
 		"order_id":       event.OrderID,
 		"price":          event.Price,
@@ -287,7 +306,11 @@ func (p *ProcessEvent) handleOfferAccepted(ctx context.Context, value []byte) er
 		"_email":         event.MasterEmail,
 	})
 
-	customerData, _ := json.Marshal(map[string]interface{}{
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
+
+	customerData, err := json.Marshal(map[string]interface{}{
 		"offer_id":       event.OfferID,
 		"order_id":       event.OrderID,
 		"price":          event.Price,
@@ -295,6 +318,10 @@ func (p *ProcessEvent) handleOfferAccepted(ctx context.Context, value []byte) er
 		"customer_email": event.CustomerEmail,
 		"_email":         event.CustomerEmail,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	notifications := []*domain.Notification{
 		domain.NewNotification(masterID, domain.NotifOfferAccepted,
@@ -330,11 +357,15 @@ func (p *ProcessEvent) handleOfferRejected(ctx context.Context, value []byte) er
 		return fmt.Errorf("parse master_id: %w", err)
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"offer_id": event.OfferID,
 		"order_id": event.OrderID,
 		"price":    event.Price,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(masterID, domain.NotifOfferRejected,
 		"Предложение отклонено",
@@ -359,17 +390,25 @@ func (p *ProcessEvent) handleOfferWithdrawn(ctx context.Context, value []byte) e
 		return fmt.Errorf("unmarshal offer.withdrawn: %w", err)
 	}
 
-	customerID, err := uuid.Parse(event.CustomerID)
-	if err != nil {
-		return fmt.Errorf("parse customer_id: %w", err)
+	customerID := uuid.Nil
+	if event.CustomerID != "" {
+		var err error
+		customerID, err = uuid.Parse(event.CustomerID)
+		if err != nil {
+			customerID = uuid.Nil
+		}
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"offer_id":  event.OfferID,
 		"order_id":  event.OrderID,
 		"master_id": event.MasterID,
 		"price":     event.Price,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(customerID, domain.NotifOfferWithdrawn,
 		"Предложение отозвано",
@@ -400,13 +439,17 @@ func (p *ProcessEvent) handleOfferCountered(ctx context.Context, value []byte) e
 		return fmt.Errorf("parse master_id: %w", err)
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"offer_id":      event.OfferID,
 		"order_id":      event.OrderID,
 		"customer_id":   event.CustomerID,
 		"counter_price": event.CounterPrice,
 		"message":       event.Message,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(masterID, domain.NotifOfferCountered,
 		"Встречное предложение",
@@ -442,13 +485,17 @@ func (p *ProcessEvent) handleChatMessageSent(ctx context.Context, value []byte) 
 		senderName = "Кто-то"
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"message_id":  event.MessageID,
 		"chat_id":     event.ChatID,
 		"sender_id":   event.SenderID,
 		"sender_name": senderName,
 		"content":     truncateContent(event.Content, 100),
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(receiverID, domain.NotifNewMessage,
 		"Новое сообщение",
@@ -465,10 +512,17 @@ func (p *ProcessEvent) handleOrderCreated(ctx context.Context, value []byte) err
 	if err := json.Unmarshal(value, &event); err != nil {
 		return fmt.Errorf("unmarshal order.created: %w", err)
 	}
-	orderID, _ := uuid.Parse(event.OrderID)
+	orderID, err := uuid.Parse(event.OrderID)
+	if err != nil {
+		return fmt.Errorf("parse order.id: %w", err)
+	}
+	userID, err := uuid.Parse(event.CustomerID)
+	if err != nil {
+		return fmt.Errorf("parse customer_id: %w", err)
+	}
 	n := &domain.Notification{
 		ID:       uuid.New(),
-		UserID:   uuid.MustParse(event.CustomerID),
+		UserID:   userID,
 		Type:     domain.NotifSystemMessage,
 		Title:    "Заказ создан",
 		Body:     fmt.Sprintf("Ваш заказ #%s успешно создан", event.Title),
@@ -501,16 +555,24 @@ func (p *ProcessEvent) handleOrderAssigned(ctx context.Context, value []byte) er
 	if err != nil {
 		return fmt.Errorf("parse master_id: %w", err)
 	}
-	customerID, err := uuid.Parse(event.CustomerID)
-	if err != nil {
-		return fmt.Errorf("parse customer_id: %w", err)
+	customerID := uuid.Nil
+	if event.CustomerID != "" {
+		var err error
+		customerID, err = uuid.Parse(event.CustomerID)
+		if err != nil {
+			customerID = uuid.Nil
+		}
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"order_id":    event.OrderID,
 		"master_id":   event.MasterID,
 		"order_title": event.OrderTitle,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	title := "Заказ назначен"
 	if event.OrderTitle != "" {
@@ -550,15 +612,23 @@ func (p *ProcessEvent) handleOrderCompleted(ctx context.Context, value []byte) e
 	if err != nil {
 		return fmt.Errorf("parse master_id: %w", err)
 	}
-	customerID, err := uuid.Parse(event.CustomerID)
-	if err != nil {
-		return fmt.Errorf("parse customer_id: %w", err)
+	customerID := uuid.Nil
+	if event.CustomerID != "" {
+		var err error
+		customerID, err = uuid.Parse(event.CustomerID)
+		if err != nil {
+			customerID = uuid.Nil
+		}
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"order_id":    event.OrderID,
 		"order_title": event.OrderTitle,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	notifications := []*domain.Notification{
 		domain.NewNotification(masterID, domain.NotifOrderCompleted,
@@ -591,9 +661,13 @@ func (p *ProcessEvent) handleOrderCancelled(ctx context.Context, value []byte) e
 		return fmt.Errorf("unmarshal order.cancelled: %w", err)
 	}
 
-	customerID, err := uuid.Parse(event.CustomerID)
-	if err != nil {
-		return fmt.Errorf("parse customer_id: %w", err)
+	customerID := uuid.Nil
+	if event.CustomerID != "" {
+		var err error
+		customerID, err = uuid.Parse(event.CustomerID)
+		if err != nil {
+			customerID = uuid.Nil
+		}
 	}
 
 	reason := event.Reason
@@ -601,12 +675,16 @@ func (p *ProcessEvent) handleOrderCancelled(ctx context.Context, value []byte) e
 		reason = "Причина не указана"
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"order_id":     event.OrderID,
 		"cancelled_by": event.CancelledBy,
 		"reason":       reason,
 		"order_title":  event.OrderTitle,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	notifications := []*domain.Notification{
 		domain.NewNotification(customerID, domain.NotifOrderCancelled,
@@ -652,12 +730,16 @@ func (p *ProcessEvent) handleReviewCreated(ctx context.Context, value []byte) er
 		return fmt.Errorf("parse reviewed_user_id: %w", err)
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"review_id":   event.ReviewID,
 		"reviewer_id": event.ReviewerID,
 		"rating":      event.Rating,
 		"comment":     truncateContent(event.Comment, 100),
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(reviewedUserID, domain.NotifNewReview,
 		"Новый отзыв",
@@ -686,11 +768,15 @@ func (p *ProcessEvent) handleComplaintCreated(ctx context.Context, value []byte)
 		return fmt.Errorf("parse reporter_id: %w", err)
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"complaint_id": event.ComplaintID,
 		"subject":      event.Subject,
 		"order_id":     event.OrderID,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(reporterID, domain.NotifComplaintCreated,
 		"Жалоба отправлена",
@@ -719,11 +805,15 @@ func (p *ProcessEvent) handleComplaintUpdated(ctx context.Context, value []byte)
 		return fmt.Errorf("parse reporter_id: %w", err)
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"complaint_id": event.ComplaintID,
 		"new_status":   event.NewStatus,
 		"resolution":   event.Resolution,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(reporterID, domain.NotifComplaintUpdated,
 		"Жалоба обновлена",
@@ -751,10 +841,14 @@ func (p *ProcessEvent) handleUserVerificationCreated(ctx context.Context, value 
 		return fmt.Errorf("parse user_id: %w", err)
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, err := json.Marshal(map[string]interface{}{
 		"email":              event.Email,
 		"verification_token": event.VerificationToken,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	// Verification notifications should always go via email
 	n := domain.NewNotification(userID, domain.NotifVerification,
@@ -790,10 +884,15 @@ func (p *ProcessEvent) handleUserCreated(ctx context.Context, value []byte) erro
 		name = event.Email
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
-		"role":  event.Role,
-		"email": event.Email,
+	data, err := json.Marshal(map[string]interface{}{
+		"role":   event.Role,
+		"email":  event.Email,
+		"_email": event.Email,
 	})
+
+	if err != nil {
+		p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+	}
 
 	n := domain.NewNotification(userID, domain.NotifUserCreated,
 		"Добро пожаловать на платформу",

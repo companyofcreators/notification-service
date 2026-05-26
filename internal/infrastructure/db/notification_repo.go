@@ -31,7 +31,7 @@ func (r *NotificationRepo) Create(ctx context.Context, n *notification.Notificat
 	_, err := r.pool.ExecContext(ctx,
 		`INSERT INTO notifications (id, user_id, type, title, body, data, is_read, channels, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		n.ID, n.UserID, string(n.Type), n.Title, n.Body, n.Data, n.IsRead, pq.Array(channels), n.CreatedAt,
+		n.ID, n.UserID, string(n.Type), n.Title, n.Body, notificationData(n.Data), n.IsRead, pq.Array(channels), n.CreatedAt,
 	)
 	if err != nil {
 		r.log.ErrorContext(ctx, "failed to create notification", "error", err.Error())
@@ -65,7 +65,7 @@ func (r *NotificationRepo) CreateBatch(ctx context.Context, notifications []*not
 	for i, n := range notifications {
 		channels := channelsToStringSlice(n.Channels)
 		_, err := stmt.ExecContext(ctx,
-			n.ID, n.UserID, string(n.Type), n.Title, n.Body, n.Data, n.IsRead, pq.Array(channels), n.CreatedAt,
+			n.ID, n.UserID, string(n.Type), n.Title, n.Body, notificationData(n.Data), n.IsRead, pq.Array(channels), n.CreatedAt,
 		)
 		if err != nil {
 			r.log.ErrorContext(ctx, "failed to create notification in batch",
@@ -81,6 +81,13 @@ func (r *NotificationRepo) CreateBatch(ctx context.Context, notifications []*not
 	}
 
 	return nil
+}
+
+func notificationData(data []byte) string {
+	if len(data) == 0 {
+		return "{}"
+	}
+	return string(data)
 }
 
 // ListByUser returns paginated notifications for a user, ordered by created_at DESC.
@@ -259,4 +266,3 @@ func stringSliceToChannels(strs []string) []notification.DeliveryChannel {
 
 // Ensure NotificationRepo satisfies the repository interface.
 var _ notification.NotificationRepository = (*NotificationRepo)(nil)
-

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -114,6 +115,9 @@ func (p *ProcessEvent) createAndDeliver(ctx context.Context, n *domain.Notificat
 				p.log.ErrorContext(ctx, "failed to send ws notification", "error", serr)
 			}
 		case domain.ChannelEmail:
+			if n.Type == domain.NotifVerification {
+				continue
+			}
 			toEmail := resolveEmail(n)
 			p.producer.PublishEmail(ctx, kafkainfra.EmailMessage{
 				ToEmail:      toEmail,
@@ -175,6 +179,9 @@ func (p *ProcessEvent) createAndDeliverBatch(ctx context.Context, notifications 
 					p.log.ErrorContext(ctx, "failed to send ws notification", "error", serr)
 				}
 			case domain.ChannelEmail:
+				if n.Type == domain.NotifVerification {
+					continue
+				}
 				p.producer.PublishEmail(ctx, kafkainfra.EmailMessage{
 					ToEmail:      resolveEmail(n),
 					UserID:       n.UserID.String(),
@@ -423,17 +430,24 @@ func (p *ProcessEvent) handleOfferWithdrawn(ctx context.Context, value []byte) e
 // Notify the master that the customer proposed a new price.
 func (p *ProcessEvent) handleOfferCountered(ctx context.Context, value []byte) error {
 	var event struct {
-		OfferID      string  `json:"offer_id"`
-		OrderID      string  `json:"order_id"`
-		MasterID     string  `json:"master_id"`
-		CustomerID   string  `json:"customer_id"`
-		CounterPrice float64 `json:"counter_price"`
-		Message      string  `json:"message"`
+		OfferID       string  `json:"offer_id"`
+		OrderID       string  `json:"order_id"`
+		MasterID      string  `json:"master_id"`
+		CustomerID    string  `json:"customer_id"`
+		CounterPrice  float64 `json:"counter_price"`
+		ProposedPrice float64 `json:"proposed_price"`
+		Message       string  `json:"message"`
 	}
 	if err := json.Unmarshal(value, &event); err != nil {
 		return fmt.Errorf("unmarshal offer.countered: %w", err)
 	}
 
+	if event.CounterPrice == 0 {
+		event.CounterPrice = event.ProposedPrice
+	}
+	if event.MasterID == "" {
+		return nil
+	}
 	masterID, err := uuid.Parse(event.MasterID)
 	if err != nil {
 		return fmt.Errorf("parse master_id: %w", err)
@@ -521,12 +535,15 @@ func (p *ProcessEvent) handleOrderCreated(ctx context.Context, value []byte) err
 		return fmt.Errorf("parse customer_id: %w", err)
 	}
 	n := &domain.Notification{
-		ID:       uuid.New(),
-		UserID:   userID,
-		Type:     domain.NotifSystemMessage,
-		Title:    "Заказ создан",
-		Body:     fmt.Sprintf("Ваш заказ #%s успешно создан", event.Title),
-		Channels: []domain.DeliveryChannel{domain.ChannelWebSocket, domain.ChannelEmail},
+		ID:        uuid.New(),
+		UserID:    userID,
+		Type:      domain.NotifSystemMessage,
+		Title:     "Заказ создан",
+		Body:      fmt.Sprintf("Ваш заказ #%s успешно создан", event.Title),
+		Data:      json.RawMessage("{}"),
+		IsRead:    false,
+		Channels:  []domain.DeliveryChannel{domain.ChannelWebSocket, domain.ChannelEmail},
+		CreatedAt: time.Now().UTC(),
 	}
 	_ = orderID
 	return p.createAndDeliver(ctx, n)
@@ -549,6 +566,26 @@ func (p *ProcessEvent) handleOrderAssigned(ctx context.Context, value []byte) er
 	}
 	if err := json.Unmarshal(value, &event); err != nil {
 		return fmt.Errorf("unmarshal order.assigned: %w", err)
+	}
+
+	if event.MasterID == "" {
+		customerID, err := uuid.Parse(event.CustomerID)
+		if err != nil {
+			return nil
+		}
+		data, err := json.Marshal(map[string]interface{}{
+			"order_id":    event.OrderID,
+			"order_title": event.OrderTitle,
+		})
+		if err != nil {
+			p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+		}
+		n := domain.NewNotification(customerID, domain.NotifOrderAssigned,
+			"Р—Р°РєР°Р· РЅР°Р·РЅР°С‡РµРЅ",
+			"РњР°СЃС‚РµСЂ РЅР°Р·РЅР°С‡РµРЅ РЅР° РІР°С€ Р·Р°РєР°Р·",
+			data, p.resolveChannelsForUser(ctx, customerID, domain.NotifOrderAssigned),
+		)
+		return p.createAndDeliver(ctx, n)
 	}
 
 	masterID, err := uuid.Parse(event.MasterID)
@@ -606,6 +643,26 @@ func (p *ProcessEvent) handleOrderCompleted(ctx context.Context, value []byte) e
 	}
 	if err := json.Unmarshal(value, &event); err != nil {
 		return fmt.Errorf("unmarshal order.completed: %w", err)
+	}
+
+	if event.MasterID == "" {
+		customerID, err := uuid.Parse(event.CustomerID)
+		if err != nil {
+			return nil
+		}
+		data, err := json.Marshal(map[string]interface{}{
+			"order_id":    event.OrderID,
+			"order_title": event.OrderTitle,
+		})
+		if err != nil {
+			p.log.ErrorContext(ctx, "failed to marshal notification data", "error", err)
+		}
+		n := domain.NewNotification(customerID, domain.NotifOrderCompleted,
+			"Р—Р°РєР°Р· Р·Р°РІРµСЂС€С‘РЅ",
+			"Р’Р°С€ Р·Р°РєР°Р· РѕС‚РјРµС‡РµРЅ РєР°Рє Р·Р°РІРµСЂС€С‘РЅРЅС‹Р№",
+			data, p.resolveChannelsForUser(ctx, customerID, domain.NotifOrderCompleted),
+		)
+		return p.createAndDeliver(ctx, n)
 	}
 
 	masterID, err := uuid.Parse(event.MasterID)
@@ -718,6 +775,8 @@ func (p *ProcessEvent) handleReviewCreated(ctx context.Context, value []byte) er
 		ReviewID       string `json:"review_id"`
 		ReviewerID     string `json:"reviewer_id"`
 		ReviewedUserID string `json:"reviewed_user_id"`
+		FromUserID     string `json:"from_user_id"`
+		ToUserID       string `json:"to_user_id"`
 		Rating         int    `json:"rating"`
 		Comment        string `json:"comment"`
 	}
@@ -725,6 +784,12 @@ func (p *ProcessEvent) handleReviewCreated(ctx context.Context, value []byte) er
 		return fmt.Errorf("unmarshal review.created: %w", err)
 	}
 
+	if event.ReviewerID == "" {
+		event.ReviewerID = event.FromUserID
+	}
+	if event.ReviewedUserID == "" {
+		event.ReviewedUserID = event.ToUserID
+	}
 	reviewedUserID, err := uuid.Parse(event.ReviewedUserID)
 	if err != nil {
 		return fmt.Errorf("parse reviewed_user_id: %w", err)

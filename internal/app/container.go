@@ -1,13 +1,17 @@
 package app
 
 import (
+	"crypto/rsa"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jmoiron/sqlx"
 
 	notifapp "github.com/companyofcreators/notification-service/internal/application/notification"
+	"github.com/companyofcreators/notification-service/internal/infrastructure/userclient"
 	"github.com/companyofcreators/notification-service/internal/config"
 	domain "github.com/companyofcreators/notification-service/internal/domain/notification"
 	dbinfra "github.com/companyofcreators/notification-service/internal/infrastructure/db"
@@ -20,6 +24,7 @@ import (
 
 // Container holds all the wired dependencies for the notification service.
 type Container struct {
+	JWTPublicKey *rsa.PublicKey
 	Config        *config.Config
 	Log           *slog.Logger
 	Pool          *sqlx.DB
@@ -83,13 +88,20 @@ func NewContainer(ctx context.Context) (*Container, error) {
 	notificationRepo := dbinfra.NewNotificationRepo(pool, log)
 
 	// Initialize use cases
-	processEvent := notifapp.NewProcessEvent(notificationRepo, producer, hub, log)
+	userClient := userclient.New(cfg.UserServiceURL, cfg.HeaderHMACKey)
+	processEvent := notifapp.NewProcessEvent(notificationRepo, producer, hub, userClient, log)
 	deliver := notifapp.NewDeliver(notificationRepo, hub, log)
 	list := notifapp.NewList(notificationRepo, log)
 
 	// Initialize HTTP handlers
 	notificationHandler := httphandler.NewNotificationHandler(list, deliver, log)
-	wsHandler := wshandler.NewWSHandler(hub, log, cfg.AllowedOrigin)
+	// Load JWT public key for WS auth
+	jwtPubKey, err := loadRSAPublicKey(cfg.JWTPublicKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load jwt public key: %w", err)
+	}
+
+	wsHandler := wshandler.NewWSHandler(hub, jwtPubKey, log)
 
 	return &Container{
 		Config:              cfg,
@@ -124,4 +136,17 @@ func (c *Container) Shutdown() {
 
 	// Close database pool
 	c.Pool.Close()
+}
+
+// loadRSAPublicKey loads an RSA public key from a PEM file.
+func loadRSAPublicKey(path string) (*rsa.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read public key: %w", err)
+	}
+	key, err := jwt.ParseRSAPublicKeyFromPEM(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse public key: %w", err)
+	}
+	return key, nil
 }

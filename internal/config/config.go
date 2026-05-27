@@ -17,7 +17,9 @@ type Config struct {
 	ConsumerGroup string `env:"KAFKA_CONSUMER_GROUP" env-default:"notification-service"`
 	HeaderHMACKey string `env:"HEADER_HMAC_KEY" env-default:"diploma-internal-hmac-secret-key-2026"`
 	LogLevel      string `env:"LOG_LEVEL" env-default:"info"`
-	AllowedOrigin string `env:"WS_ALLOWED_ORIGIN" env-default:""`
+	AllowedOrigin     string `env:"WS_ALLOWED_ORIGIN" env-default:""`
+	UserServiceURL string `env:"USER_SERVICE_URL" env-default:"http://localhost:8082"`
+	JWTPublicKeyPath  string `env:"JWT_PUBLIC_KEY_PATH" env-default:"../keys/public.pem"`
 }
 
 // Load reads configuration from environment variables and .env file.

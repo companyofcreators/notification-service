@@ -8,21 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 )
 
 const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
 )
 
@@ -32,29 +25,8 @@ type Client struct {
 	conn   *websocket.Conn
 	hub    *Hub
 	send   chan []byte
-}
-
-// readPump reads messages from the WebSocket connection.
-// In push-only mode, we only listen for pong messages and close signals.
-func (c *Client) readPump() {
-	defer func() {
-		c.hub.unregister <- c
-		c.conn.Close()
-	}()
-
-	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
-
-	for {
-		_, _, err := c.conn.ReadMessage()
-		if err != nil {
-			break
-		}
-	}
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // writePump writes messages to the WebSocket connection.
@@ -62,32 +34,36 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		c.conn.Close(websocket.StatusNormalClosure, "")
 	}()
 
 	for {
 		select {
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			writeCtx, cancel := context.WithTimeout(c.ctx, writeWait)
+			if err := c.conn.Write(writeCtx, websocket.MessageText, message); err != nil {
+				cancel()
 				return
 			}
+			cancel()
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			pingCtx, cancel := context.WithTimeout(c.ctx, writeWait)
+			if err := c.conn.Ping(pingCtx); err != nil {
+				cancel()
 				return
 			}
+			cancel()
+		case <-c.ctx.Done():
+			return
 		}
 	}
 }
 
-// Hub maintains the set of active clients grouped by user ID and broadcasts messages to them.
+// Hub maintains the set of active clients grouped by user ID.
 type Hub struct {
-	// clients is a map from userID to a set of connections (supports multiple devices).
 	clients    map[uuid.UUID]map[*Client]struct{}
 	register   chan *Client
 	unregister chan *Client
@@ -125,7 +101,7 @@ func (h *Hub) run() {
 			}
 			h.clients[client.UserID][client] = struct{}{}
 			h.mu.Unlock()
-			h.log.DebugContext(context.Background(), "websocket client connected",
+			h.log.DebugContext(context.Background(), "ws client connected",
 				"user_id", client.UserID.String(),
 			)
 
@@ -135,33 +111,37 @@ func (h *Hub) run() {
 				if _, exists := clients[client]; exists {
 					delete(clients, client)
 					close(client.send)
+					client.cancel()
 					if len(clients) == 0 {
 						delete(h.clients, client.UserID)
 					}
 				}
 			}
 			h.mu.Unlock()
-			h.log.DebugContext(context.Background(), "websocket client disconnected",
+			h.log.DebugContext(context.Background(), "ws client disconnected",
 				"user_id", client.UserID.String(),
 			)
 		}
 	}
 }
 
-// RegisterClient upgrades an HTTP connection to WebSocket and registers the client.
+// RegisterClient registers a new WebSocket connection for a user.
 func (h *Hub) RegisterClient(userID uuid.UUID, conn *websocket.Conn) *Client {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	client := &Client{
 		UserID: userID,
 		conn:   conn,
 		hub:    h,
 		send:   make(chan []byte, 64),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	h.register <- client
 
 	go client.writePump()
-	go client.readPump()
 
-	// Send welcome message so client knows connection is established.
+	// Send welcome message
 	welcome, _ := json.Marshal(NotificationMessage{
 		Type: "notification.connected",
 	})
@@ -171,6 +151,21 @@ func (h *Hub) RegisterClient(userID uuid.UUID, conn *websocket.Conn) *Client {
 	}
 
 	return client
+}
+
+// UnregisterClient removes a client from the hub.
+func (h *Hub) UnregisterClient(userID uuid.UUID, conn *websocket.Conn) {
+	h.mu.Lock()
+	if clients, ok := h.clients[userID]; ok {
+		for client := range clients {
+			if client.conn == conn {
+				h.mu.Unlock()
+				h.unregister <- client
+				return
+			}
+		}
+	}
+	h.mu.Unlock()
 }
 
 // SendToUser sends a JSON message to all WebSocket connections of a specific user.
@@ -190,7 +185,7 @@ func (h *Hub) SendToUser(userID uuid.UUID, msgType string, notificationPayload j
 	h.mu.RUnlock()
 
 	if !ok || len(clients) == 0 {
-		return nil // User not connected, not an error
+		return nil
 	}
 
 	h.mu.RLock()
@@ -200,20 +195,17 @@ func (h *Hub) SendToUser(userID uuid.UUID, msgType string, notificationPayload j
 		select {
 		case client.send <- data:
 		default:
-			// Client buffer is full, drop the message and close connection
-			h.log.WarnContext(context.Background(), "client send buffer full, dropping message",
+			h.log.WarnContext(context.Background(), "client send buffer full",
 				"user_id", userID.String(),
 			)
-			go func(c *Client) {
-				h.unregister <- c
-			}(client)
+			go func(c *Client) { h.unregister <- c }(client)
 		}
 	}
 
 	return nil
 }
 
-// SendUnreadCount sends the unread notification count to all connections of a user.
+// SendUnreadCount sends the unread notification count to a user.
 func (h *Hub) SendUnreadCount(userID uuid.UUID, count int) error {
 	msg := NotificationMessage{
 		Type:  "notification.unread_count",
@@ -222,7 +214,7 @@ func (h *Hub) SendUnreadCount(userID uuid.UUID, count int) error {
 
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("marshal unread count message: %w", err)
+		return fmt.Errorf("marshal unread count: %w", err)
 	}
 
 	h.mu.RLock()
@@ -232,9 +224,7 @@ func (h *Hub) SendUnreadCount(userID uuid.UUID, count int) error {
 		select {
 		case client.send <- data:
 		default:
-			go func(c *Client) {
-				h.unregister <- c
-			}(client)
+			go func(c *Client) { h.unregister <- c }(client)
 		}
 	}
 
@@ -255,12 +245,11 @@ func (h *Hub) CloseAll() {
 
 	for userID, clients := range h.clients {
 		for client := range clients {
-			client.conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
-			client.conn.Close()
+			client.conn.Close(websocket.StatusGoingAway, "server shutting down")
 			close(client.send)
+			client.cancel()
 		}
-		h.log.InfoContext(context.Background(), "closed websocket connections for user", "user_id", userID.String())
+		h.log.InfoContext(context.Background(), "closed ws connections", "user_id", userID.String())
 	}
 
 	h.clients = make(map[uuid.UUID]map[*Client]struct{})

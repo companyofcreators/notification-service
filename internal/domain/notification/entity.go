@@ -40,15 +40,15 @@ const (
 
 // Notification is the core domain entity representing a notification to be delivered.
 type Notification struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	Type      NotificationType
-	Title     string
-	Body      string
-	Data      json.RawMessage
-	IsRead    bool
-	Channels  []DeliveryChannel
-	CreatedAt time.Time
+	ID        uuid.UUID          `json:"id"`
+	UserID    uuid.UUID          `json:"user_id"`
+	Type      NotificationType   `json:"type"`
+	Title     string             `json:"title"`
+	Body      string             `json:"body"`
+	Data      json.RawMessage    `json:"data"`
+	IsRead    bool               `json:"is_read"`
+	Channels  []DeliveryChannel  `json:"channels"`
+	CreatedAt time.Time          `json:"created_at"`
 }
 
 // NotificationPreference determines how a user wants to receive notifications of a given type.

@@ -16,10 +16,16 @@ import (
 
 // ProcessEvent is the use case that processes incoming Kafka events and creates notifications.
 type ProcessEvent struct {
-	repo     domain.NotificationRepository
-	producer *kafkainfra.Producer
-	hub      *ws.Hub
-	log      *slog.Logger
+	repo       domain.NotificationRepository
+	producer   *kafkainfra.Producer
+	hub        *ws.Hub
+	userClient UserNameResolver
+	log        *slog.Logger
+}
+
+// UserNameResolver resolves a user ID to a display name.
+type UserNameResolver interface {
+	GetName(ctx context.Context, userID string) string
 }
 
 // NewProcessEvent creates a new ProcessEvent use case.
@@ -27,13 +33,15 @@ func NewProcessEvent(
 	repo domain.NotificationRepository,
 	producer *kafkainfra.Producer,
 	hub *ws.Hub,
+	userClient UserNameResolver,
 	log *slog.Logger,
 ) *ProcessEvent {
 	return &ProcessEvent{
-		repo:     repo,
-		producer: producer,
-		hub:      hub,
-		log:      log,
+		repo:       repo,
+		producer:   producer,
+		hub:        hub,
+		userClient: userClient,
+		log:        log,
 	}
 }
 
@@ -495,8 +503,11 @@ func (p *ProcessEvent) handleChatMessageSent(ctx context.Context, value []byte) 
 	}
 
 	senderName := event.SenderName
+	if senderName == "" && p.userClient != nil {
+		senderName = p.userClient.GetName(ctx, event.SenderID)
+	}
 	if senderName == "" {
-		senderName = "Кто-то"
+		senderName = "Пользователь"
 	}
 
 	data, err := json.Marshal(map[string]interface{}{

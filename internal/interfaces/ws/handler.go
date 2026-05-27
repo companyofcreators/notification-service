@@ -1,83 +1,71 @@
 package ws
 
 import (
+	"context"
+	"crypto/rsa"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/coder/websocket"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 
 	wsHub "github.com/companyofcreators/notification-service/internal/infrastructure/ws"
 )
 
-// WSHandler handles WebSocket upgrade requests.
+// WSHandler handles WebSocket upgrade requests with JWT authentication.
 type WSHandler struct {
-	hub           *wsHub.Hub
-	log           *slog.Logger
-	upgrader      websocket.Upgrader
-	allowedOrigin string
+	hub        *wsHub.Hub
+	log        *slog.Logger
+	jwtPubKey  *rsa.PublicKey
 }
 
 // NewWSHandler creates a new WebSocket handler.
-func NewWSHandler(hub *wsHub.Hub, log *slog.Logger, allowedOrigin string) *WSHandler {
-	h := &WSHandler{
-		hub:           hub,
-		log:           log,
-		allowedOrigin: allowedOrigin,
+func NewWSHandler(hub *wsHub.Hub, jwtPubKey *rsa.PublicKey, log *slog.Logger) *WSHandler {
+	return &WSHandler{
+		hub:       hub,
+		log:       log,
+		jwtPubKey: jwtPubKey,
 	}
-	h.upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		CheckOrigin:     h.checkOrigin,
-	}
-	return h
 }
 
-// checkOrigin validates the Origin header.
-// Allows localhost, 127.0.0.1, 192.168.0.103 (any port), and same-origin.
-func (h *WSHandler) checkOrigin(r *http.Request) bool {
-	if h.allowedOrigin != "" {
-		origin := r.Header.Get("Origin")
-		return origin == h.allowedOrigin
-	}
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true // non-browser clients may not send Origin
-	}
-	// Same-origin
-	if origin == "http://"+r.Host || origin == "https://"+r.Host {
-		return true
-	}
-	// Local network for development (any port)
-	originLower := strings.ToLower(origin)
-	return strings.Contains(originLower, "//localhost:") ||
-		strings.Contains(originLower, "//127.0.0.1:") ||
-		strings.Contains(originLower, "//192.168.0.103")
+// Claims represents the JWT claims for WebSocket authentication.
+type Claims struct {
+	jwt.RegisteredClaims
+	Email string `json:"email"`
+	Role  string `json:"role"`
 }
 
-// HandleWebSocket upgrades an HTTP connection to a WebSocket and registers the client.
-// The user is identified by the X-User-ID header.
+// HandleWebSocket upgrades an HTTP connection to a WebSocket after JWT validation.
+// Requires ?token=JWT query parameter.
 func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	userIDStr := r.Header.Get("X-User-ID")
-	if userIDStr == "" {
-		// Also try query parameter for WebSocket connections from browsers
-		userIDStr = r.URL.Query().Get("user_id")
-	}
-	if userIDStr == "" {
-		http.Error(w, "user_id обязателен", http.StatusUnauthorized)
+	tokenStr := r.URL.Query().Get("token")
+	if tokenStr == "" {
+		http.Error(w, "отсутствует параметр token", http.StatusUnauthorized)
 		return
 	}
 
-	userID, err := uuid.Parse(userIDStr)
+	claims, err := h.validateToken(tokenStr)
 	if err != nil {
-		http.Error(w, "недействительный user_id", http.StatusBadRequest)
+		h.log.WarnContext(r.Context(), "invalid JWT token for websocket",
+			"error", err.Error(),
+		)
+		http.Error(w, "недействительный токен", http.StatusUnauthorized)
 		return
 	}
 
-	conn, err := h.upgrader.Upgrade(w, r, nil)
+	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
-		h.log.ErrorContext(r.Context(), "failed to upgrade websocket connection", "error", err)
+		http.Error(w, "недействительный user_id в токене", http.StatusBadRequest)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		h.log.ErrorContext(r.Context(), "failed to upgrade websocket", "error", err)
 		return
 	}
 
@@ -87,4 +75,66 @@ func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"user_id", userID.String(),
 		"client", client,
 	)
+
+	// Start read pump to handle pings and disconnect
+	go h.readPump(userID, conn)
+}
+
+// validateToken parses and validates a RS256 JWT token.
+func (h *WSHandler) validateToken(tokenStr string) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &Claims{},
+		func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return h.jwtPubKey, nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		return nil, jwt.ErrSignatureInvalid
+	}
+
+	return claims, nil
+}
+
+// readPump keeps the WebSocket connection alive by reading pings.
+func (h *WSHandler) readPump(userID uuid.UUID, conn *websocket.Conn) {
+	defer func() {
+		h.hub.UnregisterClient(userID, conn)
+		conn.Close(websocket.StatusNormalClosure, "")
+	}()
+
+	ctx := context.Background()
+
+	for {
+		_, _, err := conn.Read(ctx)
+		if err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusGoingAway ||
+				websocket.CloseStatus(err) == websocket.StatusNormalClosure {
+				return
+			}
+			h.log.Debug("websocket read error",
+				"user_id", userID.String(),
+				"error", err.Error(),
+			)
+			return
+		}
+	}
+}
+
+// checkOrigin validates the Origin header for browser clients.
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	originLower := strings.ToLower(origin)
+	return strings.HasPrefix(originLower, "http://localhost") ||
+		strings.HasPrefix(originLower, "http://127.0.0.1") ||
+		strings.Contains(originLower, "192.168.0.")
 }
